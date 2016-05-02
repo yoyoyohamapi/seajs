@@ -2,18 +2,19 @@
  * util-request.js - The utilities for requesting script and style files
  * ref: tests/research/load-js-css/test.html
  */
+// 如果浏览器支持webworker, 则通过webwoker请求脚本
 if (isWebWorker) {
   function requestFromWebWorker(url, callback, charset, crossorigin) {
     // Load with importScripts
     var error
     try {
-      importScripts(url)
+      importScripts(url) // importScripts为html5的一个API
     } catch (e) {
       error = e
     }
     callback(error)
   }
-  // For Developers
+  // For Developers]
   seajs.request = requestFromWebWorker
 }
 else {
@@ -36,6 +37,7 @@ else {
 
     addOnload(node, callback, url)
 
+    // 创建的是一个异步的script的标签
     node.async = true
     node.src = url
 
@@ -45,6 +47,7 @@ else {
     currentlyAddingScript = node
 
     // ref: #185 & http://dev.jquery.com/ticket/2709
+    // 创建完成后插入到文档中,这个只是暂时插入, 在模块onload之后进行删除
     baseElement ?
         head.insertBefore(node, baseElement) :
         head.appendChild(node)
@@ -70,12 +73,14 @@ else {
       }
     }
 
+    // 模块onload预示着script已经执行完毕, 此时我们从dom中删除该script节点
     function onload(error) {
       // Ensure only run once and handle memory leak in IE
       node.onload = node.onerror = node.onreadystatechange = null
 
       // Remove the script to reduce memory leak
       if (!data.debug) {
+        // 暂时的插入完成后,
         head.removeChild(node)
       }
 

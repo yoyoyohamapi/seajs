@@ -4,7 +4,7 @@
 
 var events = data.events = {}
 
-// Bind event
+// 绑定事件
 seajs.on = function(name, callback) {
   var list = events[name] || (events[name] = [])
   list.push(callback)
@@ -38,8 +38,9 @@ seajs.off = function(name, callback) {
   return seajs
 }
 
-// Emit event, firing all bound callbacks. Callbacks receive the same
-// arguments as `emit` does, apart from the event name
+// 发出一个事件(事件名, 捎带数据)
+// 根据事件名获得与此事件绑定的所有回调函数(即事件监听器)
+// 以捎带数据作为回调参数, 执行回调函数
 var emit = seajs.emit = function(name, data) {
   var list = events[name]
 

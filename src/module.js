@@ -2,41 +2,56 @@
  * module.js - The core of module loader
  */
 
+// 以下涉及到的事件分派主要交给seajs的插件完成,
+
+// 用一个缓存对象来缓存模块, 各个模块以其uri进行标识
 var cachedMods = seajs.cache = {}
 var anonymousMeta
 
+// 获取队列
 var fetchingList = {}
+
+// 以获取队列
 var fetchedList = {}
+
+// 回调队列
 var callbackList = {}
 
+// sea定义的几个模块加载状态
 var STATUS = Module.STATUS = {
   // 1 - The `module.uri` is being fetched
-  FETCHING: 1,
+  FETCHING: 1, // 获取模块中
   // 2 - The meta data has been saved to cachedMods
-  SAVED: 2,
+  SAVED: 2, // 模块的元信息已经被存入了缓存
   // 3 - The `module.dependencies` are being loaded
-  LOADING: 3,
+  LOADING: 3, // 加载模块的依赖
   // 4 - The module are ready to execute
-  LOADED: 4,
+  LOADED: 4, // 模块所有的依赖都被加载, 因此模块即将被执行
   // 5 - The module is being executed
-  EXECUTING: 5,
+  EXECUTING: 5, // 模块执行中
   // 6 - The `module.exports` is available
-  EXECUTED: 6,
+  EXECUTED: 6, // 模块执行完毕,相应的外部接口暴露完毕
   // 7 - 404
   ERROR: 7
 }
 
-
+// 模块的构造函数, 主要是初始该模块的一些信息
 function Module(uri, deps) {
-  this.uri = uri
-  this.dependencies = deps || []
-  this.deps = {} // Ref the dependence modules
-  this.status = 0
+  this.uri = uri // 模块地址
 
-  this._entry = []
+  this.dependencies = deps || [] // 模块的相应依赖项,保存的是依赖id
+
+  this.deps = {} // 模块的依赖,保存的是依赖的模块的引用
+
+  this.status = 0 // 模块的加载状况
+
+  this._entry = [] // 模块的入口列表
 }
 
-// Resolve module.dependencies
+/**
+ * 从当前对象中解析出其依赖的uri数组
+ * @returns {Array}
+ */
 Module.prototype.resolve = function() {
   var mod = this
   var ids = mod.dependencies
@@ -53,13 +68,17 @@ Module.prototype.pass = function() {
 
   var len = mod.dependencies.length
 
+  // 遍历模块的各个入口
   for (var i = 0; i < mod._entry.length; i++) {
     var entry = mod._entry[i]
     var count = 0
+    // 遍历模块的各个依赖
     for (var j = 0; j < len; j++) {
       var m = mod.deps[mod.dependencies[j]]
+      // 如果该依赖尚未加载完毕, 并且没有在entry中使用,
       // If the module is unload and unused in the entry, pass entry to it
       if (m.status < STATUS.LOADED && !entry.history.hasOwnProperty(m.uri)) {
+        // 当前模块的入口通过依赖的uri进行标定
         entry.history[m.uri] = true
         count++
         m._entry.push(entry)
@@ -77,21 +96,25 @@ Module.prototype.pass = function() {
   }
 }
 
-// Load module.dependencies and fire onload when all done
+/**
+ * 加载当前模块的所有依赖模块,加载完成后, 调用onload回调
+ */
 Module.prototype.load = function() {
   var mod = this
 
-  // If the module is being loaded, just wait it onload call
+  // 如果模块的依赖已经在加载了, 则跳出
   if (mod.status >= STATUS.LOADING) {
     return
   }
 
+  // 标识当前模块的状态: 装载中
   mod.status = STATUS.LOADING
 
-  // Emit `load` event for plugins such as combo plugin
+  // 首先,解析出模块的依赖项的真实地址, 即依赖项的uri
   var uris = mod.resolve()
   emit("load", uris)
 
+  // 初始化当前模块的依赖模块
   for (var i = 0, len = uris.length; i < len; i++) {
     mod.deps[mod.dependencies[i]] = Module.get(uris[i])
   }
@@ -99,6 +122,7 @@ Module.prototype.load = function() {
   // Pass entry to it's dependencies
   mod.pass()
 
+  // 如果当前模块还有尚未通过的entry, 执行加载完成后的回调
   // If module has entries not be passed, call onload
   if (mod._entry.length) {
     mod.onload()
@@ -128,14 +152,18 @@ Module.prototype.load = function() {
   }
 }
 
-// Call this method when module is loaded
+/**
+ * 模块加载完成后的回调
+ */
 Module.prototype.onload = function() {
   var mod = this
   mod.status = STATUS.LOADED
 
   // When sometimes cached in IE, exec will occur before onload, make sure len is an number
+  // 遍历当前模块的各个子模块
   for (var i = 0, len = (mod._entry || []).length; i < len; i++) {
     var entry = mod._entry[i]
+    // 如果子模块加载完成, 执行子模块的回调
     if (--entry.remain === 0) {
       entry.callback()
     }
@@ -151,7 +179,10 @@ Module.prototype.error = function() {
   mod.status = STATUS.ERROR
 }
 
-// Execute a module
+/**
+ * 执行一个模块
+ * @returns {{}|*}
+ */
 Module.prototype.exec = function () {
   var mod = this
 
@@ -162,6 +193,7 @@ Module.prototype.exec = function () {
     return mod.exports
   }
 
+  // 标识当前模块正在执行中
   mod.status = STATUS.EXECUTING
 
   if (mod._entry && !mod._entry.length) {
@@ -174,14 +206,25 @@ Module.prototype.exec = function () {
     return
   }
 
+  // 开始执行过程....
+
   // Create require
   var uri = mod.uri
 
+  // 定义factory中的require函数
+
+  /**
+   * 定义factory中的require函数
+   * @param id
+   * @returns {{}|*}
+     */
   function require(id) {
+    // 是否require已存在与依赖中,如果是,直接从依赖中取得,否则, 新建一个模块
     var m = mod.deps[id] || Module.get(require.resolve(id))
     if (m.status == STATUS.ERROR) {
       throw new Error('module was broken: ' + m.uri)
     }
+    // 执行该模块
     return m.exec()
   }
 
@@ -189,12 +232,17 @@ Module.prototype.exec = function () {
     return Module.resolve(id, uri)
   }
 
+  /**
+   * 支持异步获得模块
+   * @param ids 模块依赖
+   * @param callback, 模块加载完成后的回调
+    */
   require.async = function(ids, callback) {
     Module.use(ids, callback, uri + "_async_" + cid())
     return require
   }
 
-  // Exec factory
+  // 执行工厂函数, 构造模块公开API
   var factory = mod.factory
 
   var exports = isFunction(factory) ?
@@ -209,6 +257,8 @@ Module.prototype.exec = function () {
   delete mod.factory
 
   mod.exports = exports
+
+  // 执行完毕
   mod.status = STATUS.EXECUTED
 
   // Emit `exec` event
@@ -217,23 +267,31 @@ Module.prototype.exec = function () {
   return mod.exports
 }
 
-// Fetch a module
+/**
+ * 获得模块
+ * @param requestCache
+ */
 Module.prototype.fetch = function(requestCache) {
   var mod = this
   var uri = mod.uri
 
+  // 标识模块正在获取中
   mod.status = STATUS.FETCHING
 
   // Emit `fetch` event for plugins such as combo plugin
   var emitData = { uri: uri }
   emit("fetch", emitData)
+
+  // 获得模块的请求地址
   var requestUri = emitData.requestUri || uri
 
-  // Empty uri or a non-CMD module
+  // 如果uri为空, 或者已经请求过该模块
   if (!requestUri || fetchedList.hasOwnProperty(requestUri)) {
+    // 进入模块的加载过程, 加载该模块所需的依赖项
     mod.load()
     return
   }
+
 
   if (fetchingList.hasOwnProperty(requestUri)) {
     callbackList[requestUri].push(mod)
@@ -266,7 +324,7 @@ Module.prototype.fetch = function(requestCache) {
     delete fetchingList[requestUri]
     fetchedList[requestUri] = true
 
-    // Save meta data of anonymous module
+    // 为匿名模块设置元信息
     if (anonymousMeta) {
       Module.save(uri, anonymousMeta)
       anonymousMeta = null
@@ -287,7 +345,12 @@ Module.prototype.fetch = function(requestCache) {
   }
 }
 
-// Resolve id to uri
+/**
+ * 通过指定的模块id获得模块的uri
+ * @param id
+ * @param refUri
+ * @returns {*}
+ */
 Module.resolve = function(id, refUri) {
   // Emit `resolve` event for plugins such as text plugin
   var emitData = { id: id, refUri: refUri }
@@ -296,19 +359,27 @@ Module.resolve = function(id, refUri) {
   return emitData.uri || seajs.resolve(emitData.id, refUri)
 }
 
-// Define a module
+/**
+ * 定义模块
+ * @param id 指定模块id
+ * @param deps 声明模块依赖
+ * @param factory 模块的工厂函数
+ */
 Module.define = function (id, deps, factory) {
   var argsLen = arguments.length
 
+  // 根据参数判断定义形式
   // define(factory)
   if (argsLen === 1) {
     factory = id
     id = undefined
   }
   else if (argsLen === 2) {
+    // 如果传参为两个, 纠正第二个参数为factory
     factory = deps
 
     // define(deps, factory)
+    // 纠正第一个参数
     if (isArray(id)) {
       deps = id
       id = undefined
@@ -320,10 +391,18 @@ Module.define = function (id, deps, factory) {
   }
 
   // Parse dependencies according to the module factory code
+  // 如果依赖实在factory函数中声明, 则需要解析factory的源码的
   if (!isArray(deps) && isFunction(factory)) {
     deps = typeof parseDependencies === "undefined" ? [] : parseDependencies(factory.toString())
   }
 
+  /*
+    一个模块的基本元信息应当包括:
+    - id: 模块id
+    - uri: 模块位置
+    - deps: 模块依赖
+    - factory: 工厂函数(如何生产这个模块)
+   */
   var meta = {
     id: id,
     uri: Module.resolve(id),
@@ -351,7 +430,11 @@ Module.define = function (id, deps, factory) {
     anonymousMeta = meta
 }
 
-// Save meta data to cachedMods
+/**
+ * 将模块存储至缓存-cachedMods(以uri进行标识), 仅保存模块的元信息
+ * @param uri 模块uri
+ * @param meta 模块的元信息
+ */
 Module.save = function(uri, meta) {
   var mod = Module.get(uri)
 
@@ -366,19 +449,35 @@ Module.save = function(uri, meta) {
   }
 }
 
-// Get an existed module or create a new one
+/**
+ * 根据模块uri拿到模块,如果缓存中已存在该模块,则新建一个模块
+ * @param uri
+ * @param deps 新建模块时所需要的依赖
+ * @returns {*|Module}
+ */
 Module.get = function(uri, deps) {
   return cachedMods[uri] || (cachedMods[uri] = new Module(uri, deps))
 }
 
-// Use function is equal to load a anonymous module
+/**
+ * use()方法相当于加载一个匿名模块,
+ * @param ids 该匿名模块的依赖
+ * @param callback 加载完成后的回调
+ * @param uri 通过制定uri, 使得模块成为一个具名模块
+ */
 Module.use = function (ids, callback, uri) {
   var mod = Module.get(uri, isArray(ids) ? ids : [ids])
 
+  // 初始化模块的子模块
   mod._entry.push(mod)
+
+  // 初始化模块的history
   mod.history = {}
+
+  // 初始化模块的剩余子模块
   mod.remain = 1
 
+  // 初始化模块的回调
   mod.callback = function() {
     var exports = []
     var uris = mod.resolve()

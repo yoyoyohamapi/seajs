@@ -4,6 +4,7 @@
  * ref: https://github.com/seajs/crequire
  */
 
+// 从factory源码中解析出模块依赖,
 function parseDependencies(s) {
   if(s.indexOf('require') == -1) {
     return []
@@ -110,6 +111,7 @@ function parseDependencies(s) {
       isReturn = 0
     }
   }
+  // 最终返回依赖项
   return res
   function readch() {
     peek = s.charAt(index++)
