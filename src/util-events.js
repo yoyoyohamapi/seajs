@@ -1,5 +1,6 @@
 /**
  * util-events.js - The minimal events support
+ * 通过事件机制， 能够为saejs提供无穷的插件
  */
 
 var events = data.events = {}

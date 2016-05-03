@@ -6,15 +6,18 @@
 
 // 用一个缓存对象来缓存模块, 各个模块以其uri进行标识
 var cachedMods = seajs.cache = {}
+
+// 标识当前请求的模块是否是一个匿名模块
 var anonymousMeta
 
-// 获取队列
+// 获取中队列：标识哪些uri正在被获取
 var fetchingList = {}
 
-// 以获取队列
+// 已获取队列：标识已获取到的uri
 var fetchedList = {}
 
-// 回调队列
+// 回调队列, 当中暂存了模块对象，一旦模块加载完毕，
+// 将会从callbackList取出，以其为树根，加载模块子树
 var callbackList = {}
 
 // sea定义的几个模块加载状态
@@ -49,7 +52,7 @@ function Module(uri, deps) {
 }
 
 /**
- * 从当前对象中解析出其依赖的uri数组
+ * 从当前模块的依赖id序列中中解析出其依赖的真是资源地址uri
  * @returns {Array}
  */
 Module.prototype.resolve = function() {
@@ -63,6 +66,14 @@ Module.prototype.resolve = function() {
   return uris
 }
 
+/**
+ * 设置依赖的入口
+ * 最终
+ * use中的匿名模块anonymous的入口: []
+ * 其依赖main的入口: [anonymous, main]
+ * main的依赖项hello-printer入口：[anonymous,]
+ * main的依赖项world-printer入口：[anonymous,]
+ */
 Module.prototype.pass = function() {
   var mod = this
 
@@ -75,7 +86,9 @@ Module.prototype.pass = function() {
     // 遍历模块的各个依赖
     for (var j = 0; j < len; j++) {
       var m = mod.deps[mod.dependencies[j]]
-      // 如果该依赖尚未加载完毕, 并且没有在entry中使用,
+      // 如果该依赖尚未加载完毕, 并且没有在entry的遍历历史中记录
+      // 则将入口pass给依赖，这样，逐层的传递依赖直到叶子节点
+      // 显然，应当从不再具有依赖的叶子节点回溯
       // If the module is unload and unused in the entry, pass entry to it
       if (m.status < STATUS.LOADED && !entry.history.hasOwnProperty(m.uri)) {
         // 当前模块的入口通过依赖的uri进行标定
@@ -88,9 +101,13 @@ Module.prototype.pass = function() {
       }
     }
     // If has passed the entry to it's dependencies, modify the entry's count and del it in the module
+    // 如果将入口模块都传递给了依赖
+    // 不断将entry传递给依赖，传递完成后，该模块不再持有该入口
+
     if (count > 0) {
       entry.remain += count - 1
       mod._entry.shift()
+      // 因为mod._entry.length在变化
       i--
     }
   }
@@ -98,6 +115,9 @@ Module.prototype.pass = function() {
 
 /**
  * 加载当前模块的所有依赖模块,加载完成后, 调用onload回调
+ * 在onload中，依赖的factory会被执行， 对外暴露该依赖
+ * 该方法针对的是模块依赖
+ * load某个模块依赖的初期，我们仅保存有依赖id
  */
 Module.prototype.load = function() {
   var mod = this
@@ -120,31 +140,44 @@ Module.prototype.load = function() {
   }
 
   // Pass entry to it's dependencies
+  // 将自己的入口传给依赖， 例如main的入口为匿名模块anonymous，
+  // 则依赖的入口显然应当具有入口anonymous
   mod.pass()
 
-  // 如果当前模块还有尚未通过的entry, 执行加载完成后的回调
+  // 如果当前模块还有尚未pass的entry, 执行load完成后的回调
   // If module has entries not be passed, call onload
   if (mod._entry.length) {
     mod.onload()
     return
   }
 
-  // Begin parallel loading
-  var requestCache = {}
+  // 开始并行加载模块
+
+  var requestCache = {} // 设置一个请求缓存
   var m
 
+  // 遍历各个依赖
   for (i = 0; i < len; i++) {
     m = cachedMods[uris[i]]
 
+    // 如果模块文件尚未取得，则先取得依赖文件
     if (m.status < STATUS.FETCHING) {
       m.fetch(requestCache)
+      // fetch结束后， m的模块内容尚未被请求到， 仅在requestCache中保存了请求函数
+      // 之后再一起发送请求，即对于模块mod的各个依赖的请求将被并行发送
     }
+
+    // 否则，如果依赖文件已经取得，则加载依赖的依赖
     else if (m.status === STATUS.SAVED) {
       m.load()
+      // load结束后，m的依赖也被存储
     }
+
+    // 否则什么都不需要做
   }
 
   // Send all requests at last to avoid cache bug in IE6-9. Issues#808
+  // 由于将发送请求的方法暂存在了 requestCache中，所以我们可以延迟到此时一起发送
   for (var requestUri in requestCache) {
     if (requestCache.hasOwnProperty(requestUri)) {
       requestCache[requestUri]()
@@ -153,7 +186,8 @@ Module.prototype.load = function() {
 }
 
 /**
- * 模块加载完成后的回调
+ * 模块依赖加载完成后的回调
+ * 模块依赖加载完成后意味着模块等待被执行
  */
 Module.prototype.onload = function() {
   var mod = this
@@ -163,7 +197,7 @@ Module.prototype.onload = function() {
   // 遍历当前模块的各个子模块
   for (var i = 0, len = (mod._entry || []).length; i < len; i++) {
     var entry = mod._entry[i]
-    // 如果子模块加载完成, 执行子模块的回调
+    // 向上回溯
     if (--entry.remain === 0) {
       entry.callback()
     }
@@ -172,7 +206,9 @@ Module.prototype.onload = function() {
   delete mod._entry
 }
 
-// Call this method when module is 404
+/**
+ * 当发生404时，调用该方法
+ */
 Module.prototype.error = function() {
   var mod = this
   mod.onload()
@@ -180,7 +216,7 @@ Module.prototype.error = function() {
 }
 
 /**
- * 执行一个模块
+ * 执行一个模块: 意味着执行该模块的factory方法，并返回待暴露对象exports
  * @returns {{}|*}
  */
 Module.prototype.exec = function () {
@@ -189,6 +225,7 @@ Module.prototype.exec = function () {
   // When module is executed, DO NOT execute it again. When module
   // is being executed, just return `module.exports` too, for avoiding
   // circularly calling
+  // 如果模块已经执行了，不允许模块再次执行，暴露模块即可
   if (mod.status >= STATUS.EXECUTING) {
     return mod.exports
   }
@@ -224,7 +261,7 @@ Module.prototype.exec = function () {
     if (m.status == STATUS.ERROR) {
       throw new Error('module was broken: ' + m.uri)
     }
-    // 执行该模块
+    // 模块require后，需要执行该模块
     return m.exec()
   }
 
@@ -253,9 +290,10 @@ Module.prototype.exec = function () {
     exports = mod.exports
   }
 
-  // Reduce memory leak
+  // 执行完成后， factory函数不再需要， 删之可节省内存
   delete mod.factory
 
+  // 设置该模块暴露的对象
   mod.exports = exports
 
   // 执行完毕
@@ -268,7 +306,7 @@ Module.prototype.exec = function () {
 }
 
 /**
- * 获得模块
+ * 获得模块，意即获得模块的对应js文件，并保存到文档
  * @param requestCache
  */
 Module.prototype.fetch = function(requestCache) {
@@ -285,20 +323,23 @@ Module.prototype.fetch = function(requestCache) {
   // 获得模块的请求地址
   var requestUri = emitData.requestUri || uri
 
-  // 如果uri为空, 或者已经请求过该模块
+  // 如果uri为空, 或者已经请求过该模块，则不再需要请求，开始加载依赖
   if (!requestUri || fetchedList.hasOwnProperty(requestUri)) {
-    // 进入模块的加载过程, 加载该模块所需的依赖项
     mod.load()
     return
   }
 
 
+  // 如果模块已经在请求中，在回调队列中保存该模块对象（非模块内容）, 退出
   if (fetchingList.hasOwnProperty(requestUri)) {
+    // 注意，同一个请求uri下的回调模块可能有多个
     callbackList[requestUri].push(mod)
     return
   }
 
+  // 以请求地址标识当前模块正在请求中
   fetchingList[requestUri] = true
+  //
   callbackList[requestUri] = [mod]
 
   // Emit `request` event for plugins such as text plugin
@@ -310,6 +351,8 @@ Module.prototype.fetch = function(requestCache) {
     crossorigin: isFunction(data.crossorigin) ? data.crossorigin(requestUri) : data.crossorigin
   })
 
+  // 如果设置了请求缓存，那么暂不执行请求，仅在requestCache中标记请求，为之后的并发请求提供可能
+  // 如果未设置请求缓存，则立即发送请求
   if (!emitData.requested) {
     requestCache ?
       requestCache[emitData.requestUri] = sendRequest :
@@ -320,17 +363,33 @@ Module.prototype.fetch = function(requestCache) {
     seajs.request(emitData.requestUri, emitData.onRequest, emitData.charset, emitData.crossorigin)
   }
 
+  /**
+   * 请求完成后的回调
+   * 当模块请求成功后，亦即加载成功后，新的模块的脚本内容会通过<script>标签注入到文档中，
+   * 由于<script>标签会自动运行，所以模块的define会被调用，如果define是合法的，模块会被初始化一些元信息
+   * （依赖，factory等），同时，如果请求的模块是个具名模块(define('name',deps,factory))
+   * define将会调用Module.save()存储模块，
+   * 如果是匿名模块，onRequest()中会将其装换成具名模块存储，
+   * 所以，请求成功后，模块的状态也会切换到SAVED
+   *
+   * @param error
+     */
   function onRequest(error) {
+    // 请求完成后， 从请求队列移出请求
     delete fetchingList[requestUri]
+    // 标识该uri已经被请求
     fetchedList[requestUri] = true
 
-    // 为匿名模块设置元信息
+    // 如果请求的是一个匿名模块文件
+    // 需要转换匿名模块为具名模块
     if (anonymousMeta) {
       Module.save(uri, anonymousMeta)
+      // 具名后， 匿名元信息不再需要
       anonymousMeta = null
     }
 
-    // Call callbacks
+    // 一旦模块加载完成， 从callbackList中取出对应的模块队列
+    // 以该模块为树根，加载模块子树
     var m, mods = callbackList[requestUri]
     delete callbackList[requestUri]
     while ((m = mods.shift())) {
@@ -339,6 +398,7 @@ Module.prototype.fetch = function(requestCache) {
         m.error()
       }
       else {
+        // 加载模块依赖（模块子树），
         m.load()
       }
     }
@@ -397,7 +457,7 @@ Module.define = function (id, deps, factory) {
   }
 
   /*
-    一个模块的基本元信息应当包括:
+    一个模块的基本元信息应当包括（允许额外添加）:
     - id: 模块id
     - uri: 模块位置
     - deps: 模块依赖
@@ -425,6 +485,7 @@ Module.define = function (id, deps, factory) {
   // Emit `define` event, used in nocache plugin, seajs node version etc
   emit("define", meta)
 
+  // 如果define合法，则将模块状态切换到SAVED
   meta.uri ? Module.save(meta.uri, meta) :
     // Save information for "saving" work in the script onload event
     anonymousMeta = meta
@@ -450,7 +511,9 @@ Module.save = function(uri, meta) {
 }
 
 /**
- * 根据模块uri拿到模块,如果缓存中已存在该模块,则新建一个模块
+ * 根据模块uri拿到模块,
+ * 如果缓存中存在该模块，则直接从缓存中获得，
+ * 如果缓存中不存在该模块,则新建一个模块并存至缓存
  * @param uri
  * @param deps 新建模块时所需要的依赖
  * @returns {*|Module}
@@ -461,17 +524,21 @@ Module.get = function(uri, deps) {
 
 /**
  * use()方法相当于加载一个匿名模块,
+ * Ex. seajs.use('main', function(main))
+ * 即创建了一个匿名模块，其依赖于main模块
  * @param ids 该匿名模块的依赖
  * @param callback 加载完成后的回调
  * @param uri 通过制定uri, 使得模块成为一个具名模块
  */
 Module.use = function (ids, callback, uri) {
+
+  // 创建一个匿名模块，其依赖模块由ids决定
   var mod = Module.get(uri, isArray(ids) ? ids : [ids])
 
-  // 初始化模块的子模块
+  // 设定入口模块为该匿名模块
   mod._entry.push(mod)
 
-  // 初始化模块的history
+  // 从use创建的匿名模块开始，记录各个模块的到达路径
   mod.history = {}
 
   // 初始化模块的剩余子模块
@@ -482,11 +549,13 @@ Module.use = function (ids, callback, uri) {
     var exports = []
     var uris = mod.resolve()
 
+    // 逐个执行module的依赖，以获得依赖暴露的对象
     for (var i = 0, len = uris.length; i < len; i++) {
       exports[i] = cachedMods[uris[i]].exec()
     }
 
     if (callback) {
+      // 为callback传入依赖
       callback.apply(global, exports)
     }
 
@@ -496,6 +565,7 @@ Module.use = function (ids, callback, uri) {
     delete mod._entry
   }
 
+  // 加载匿名模块的各个依赖：[main]
   mod.load()
 }
 
@@ -508,8 +578,9 @@ seajs.use = function(ids, callback) {
 }
 
 Module.define.cmd = {}
-global.define = Module.define
 
+// 所以， 我们可以直接用define
+global.define = Module.define
 
 // For Developers
 
